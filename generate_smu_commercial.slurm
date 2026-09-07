@@ -6,12 +6,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --mem=96G
-#SBATCH --time=02:00:00
-#SBATCH --output=slurm_smu_%j.out
-#SBATCH --error=slurm_smu_%j.err
+#SBATCH --mem=160G
+#SBATCH --time=03:00:00
+#SBATCH --output=logs/slurm_smu_%j.out
+#SBATCH --error=logs/slurm_smu_%j.err
 
-echo "=== SLURM Job Started: SMU Commercial ==="
+echo "=== SLURM Job Started: SMU Commercial (HQ 2-Stage) ==="
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 echo "CUDA Devices:"
@@ -25,10 +25,10 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 export UV_CACHE_DIR="$(pwd)/.uv_cache"
 export PYTHONUNBUFFERED=1
 
-mkdir -p outputs/smu_scenes outputs/smu_previews
+mkdir -p logs outputs/smu_scenes outputs/smu_previews
 
-echo "Launching full 7-scene commercial generation and assembly..."
-./.venv/bin/python generate_smu_commercial.py
+echo "Launching SMU commercial generation script with args: $@"
+./.venv/bin/python generate_smu_commercial.py "$@"
 
 STATUS=$?
 echo "=== SLURM Job Finished with exit code: ${STATUS} ==="
