@@ -59,6 +59,16 @@ uv run python -m ltx_pipelines.distilled \
     --prompt "A medium close-up shot features a Caucasian man with a beard, wearing a green and white baseball cap without any letters on the front, and a light blue shirt over a white t-shirt. He is positioned in the center of the frame, looking intently directly at the camera, his eyes focused on camera. His facial expression is one of deep concentration, with his brow slightly raised. As he looks straight at the camera, a quick sniff sound is heard, and then he speaks with a deep male voice and a satisfied tone, saying, 'I think it's so good.' The camera remains static throughout, maintaining a shallow depth of field, which keeps the man in sharp focus while the background is softly blurred, showing a beige wall behind him. After a brief pause, another short, audible sniff is heard. The man then continues to speak, his voice maintaining the same quality, as he states, 'So good. So good.' He elaborates further, emphasizing his point with a final statement, 'This got to be, it's got to be the best tool I've ever seen.'"
 ```
 
+## 🎓 SMU HPC Cluster Deployment & Commercial Pipeline
+
+For deployment on NVIDIA A100-SXM4-80GB DGX nodes via SLURM:
+- **Comprehensive Handover & Cluster Guide**: See [DOCS/HANDOVER.md](DOCS/HANDOVER.md) for full architecture details, CUDA 12.8 driver alignment, quota configurations, and bug fixes.
+- **Single Video SLURM Job**: `sbatch generate_ltx25_video.slurm`
+- **Full 7-Scene SMU Commercial Pipeline**: `sbatch generate_smu_commercial.slurm`
+  - Runs batch image-to-video conditioning across all 7 input scenes in `inputs/smu/` with single-load model caching.
+  - Automatically concatenates the scenes and muxes `inputs/smu/smu_voiceover.wav` into `outputs/smu_commercial_full.mp4`.
+
+
 In cases of GPU memory constraints, consider `--quantization fp8-cast --offload {cpu, disk}`. See [additional flags](packages/ltx-pipelines/docs/installation.md#common-cli-flags).
 
 This is **DistilledPipeline**: the fast starting point. For **production quality** (slower, more VRAM), run [DFR](#dfr-production-quality) below. For other capabilities, see [Models](#full-model-list) and [Pipelines](#available-pipelines).
