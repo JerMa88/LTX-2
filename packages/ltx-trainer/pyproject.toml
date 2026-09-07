@@ -48,11 +48,11 @@ torchaudio = [{ index = "torch-test", marker = "sys_platform != 'darwin'" }]
 
 [[tool.uv.index]]
 name = "torch"
-url = "https://download.pytorch.org/whl/cu132"
+url = "https://download.pytorch.org/whl/cu128"
 
 [[tool.uv.index]]
 name = "torch-test"
-url = "https://download.pytorch.org/whl/test/cu132/"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [dependency-groups]

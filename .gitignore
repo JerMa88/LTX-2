@@ -7,13 +7,23 @@ wheels/
 checkpoints/
 *.egg-info
 
-# Virtual environments
+# Virtual environments and caches
 .venv
 .python-version
+.uv_cache/
 
 # IDE settings
 .idea/
 .vscode/
+
+# Local cluster and run artifacts
+models/
+outputs/
+logs/
+*.out
+*.err
+slurm_*.out
+slurm_*.err
 
 # Other files
 .DS_Store

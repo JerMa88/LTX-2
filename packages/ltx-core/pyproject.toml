@@ -5,7 +5,7 @@ description = "Core implementation of Lightricks' LTX-2 model"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch~=2.7",
+    "torch==2.11.0",
     "torchaudio",
     # Gemma 4's processor imports torchvision; without this, `uv sync --package
     # ltx-pipelines` (no trainer) fails with Could not import Gemma4UnifiedProcessor.
@@ -31,13 +31,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-natten = [
-    # Pinned wheel + matching torch so DiffVAE does not hit TokPerm IMA on older
-    # PyTorch/NVIDIA stacks. Keep in sync with install hints in attention.py /
-    # diffusion_video_decoder.py and packages/ltx-pipelines/docs/optimization.md.
-    "natten==0.21.7+torch2130cu132; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
-    "torch==2.13.0; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
-]
+# natten = [
+#     "natten==0.21.7+torch2130cu132; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+#     "torch==2.13.0; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+# ]
 
 [tool.uv.sources]
 # macOS: the cu132 indexes ship no darwin wheels, so fall back to PyPI there.
@@ -48,12 +45,12 @@ natten = { index = "natten" }
 
 [[tool.uv.index]]
 name = "torch"
-url = "https://download.pytorch.org/whl/cu132"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
 name = "torch-test"
-url = "https://download.pytorch.org/whl/test/cu132/"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]

@@ -12,7 +12,7 @@ no-build-isolation-package = ["ltx-kernels"]
 # with `Cannot load symbol cublasLtGetVersion` the first time torch selects its cuDNN
 # SDPA backend. 9.24.0.43 ships tensor_ir and matches torch 2.13 / cuDNN 9.24;
 # 9.25.0.15 is yanked. Linux-only: the wheel is CUDA and has no darwin build.
-override-dependencies = ["nvidia-cudnn-cu13==9.24.0.43; sys_platform == 'linux'"]
+# override-dependencies = ["nvidia-cudnn-cu13==9.24.0.43; sys_platform == 'linux'"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -35,9 +35,9 @@ dev = [
     # Match torch's cu132 index (see packages/ltx-core pyproject): kernel builds must use
     # the venv nvcc, not a mismatched system toolkit (CI runners often ship CUDA 12.8).
     # `cccl` provides <nv/target> (pulled by cuda_fp16.h); `nvcc` alone is not enough.
-    "cuda-toolkit[nvcc,cccl]==13.2.*; sys_platform == 'linux'",
-    "nvidia-cuda-nvcc==13.2.*; sys_platform == 'linux'",
-    "nvidia-cuda-cccl==13.2.*; sys_platform == 'linux'",
+    "cuda-toolkit[nvcc,cccl]>=12.8; sys_platform == 'linux'",
+    "nvidia-cuda-nvcc>=12.8; sys_platform == 'linux'",
+    "nvidia-cuda-cccl>=12.8; sys_platform == 'linux'",
 ]
 # Opt-in compiled CUDA kernels (blockwise FP8/FP6 GEMM + multi-GPU all2all), built
 # editable from packages/ltx-kernels without build isolation (torch must already be
