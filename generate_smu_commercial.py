@@ -292,6 +292,9 @@ def render_scene(
         stg_blocks=[],
     )
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     result = pipeline(
         prompt=sc["prompt"],
         negative_prompt=args.negative_prompt,
@@ -319,7 +322,12 @@ def render_scene(
     )
 
     elapsed = time.time() - scene_t0
-    print(f"Scene {sc['id']} generated in {elapsed:.2f}s -> {scene_output}", flush=True)
+    vram_str = ""
+    if torch.cuda.is_available():
+        alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        res_gb = torch.cuda.max_memory_reserved() / (1024**3)
+        vram_str = f" [Peak VRAM: {alloc_gb:.2f} GB allocated, {res_gb:.2f} GB reserved]"
+    print(f"Scene {sc['id']} generated in {elapsed:.2f}s -> {scene_output}{vram_str}", flush=True)
 
 
 def main() -> None:
@@ -432,6 +440,19 @@ def main() -> None:
         help="Skip video generation and only run assembly",
     )
     parser.add_argument(
+        "--transformer-path",
+        type=str,
+        default=None,
+        help="Optional override for transformer checkpoint path (defaults to dev transformer bf16)",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8-cast", "fp8-scaled-mm", "nvfp4-cast", "nvfp4-prequant"],
+        help="Quantization policy: fp8-cast, fp8-scaled-mm, nvfp4-cast, nvfp4-prequant",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force regeneration of existing scene videos",
@@ -473,11 +494,13 @@ def main() -> None:
             print(f"\nInitializing LTX-2.5 TI2VidTwoStagesHQPipeline on {torch.cuda.get_device_name(0)}...", flush=True)
             t0 = time.time()
 
+            transformer_path = (
+                args.transformer_path
+                if args.transformer_path
+                else str(args.models_dir / "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors")
+            )
             model_paths = ModelPaths.from_split(
-                transformer_path=str(
-                    args.models_dir
-                    / "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors"
-                ),
+                transformer_path=transformer_path,
                 text_encoder_path=str(
                     args.models_dir / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
                 ),
@@ -500,6 +523,13 @@ def main() -> None:
                 )
             ]
 
+            quant_policy = None
+            if args.quantization:
+                from ltx_pipelines.utils.quantization_factory import QuantizationKind
+                quant_kind = QuantizationKind(args.quantization)
+                quant_policy = quant_kind.to_policy(checkpoint_path=transformer_path)
+                print(f"Applying quantization policy: {args.quantization}", flush=True)
+
             pipeline = TI2VidTwoStagesHQPipeline(
                 model_paths=model_paths,
                 distilled_lora=distilled_lora,
@@ -507,6 +537,7 @@ def main() -> None:
                 distilled_lora_strength_stage_2=args.distilled_lora_strength_stage_2,
                 spatial_upsampler_path=spatial_upsampler_path,
                 loras=(),
+                quantization=quant_policy,
                 offload_mode=OffloadMode.CPU,
             )
             print(f"HQ Pipeline initialized in {time.time() - t0:.2f}s.", flush=True)
