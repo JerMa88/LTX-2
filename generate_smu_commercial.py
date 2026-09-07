@@ -20,9 +20,12 @@ import imageio_ffmpeg
 import soundfile as sf
 import torch
 
-from ltx_core.model.video_vae import get_video_chunks_number
-from ltx_pipelines.distilled import DistilledPipeline
+from ltx_core.components.guiders import MultiModalGuiderParams
+from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+from ltx_core.model.video_vae import AUTO_TILING, get_video_chunks_number
+from ltx_pipelines.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
 from ltx_pipelines.utils.args import ImageConditioningInput
+from ltx_pipelines.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.model_paths import ModelPaths
 from ltx_pipelines.utils.types import OffloadMode
@@ -116,17 +119,31 @@ SCENES = [
 ]
 
 
-def is_video_valid(file_path: Path, expected_frames: int | None = None) -> bool:
-    """Check if video file exists, can be opened, and has valid frames."""
+def is_video_valid(
+    file_path: Path,
+    expected_frames: int | None = None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> bool:
+    """Check if video file exists, can be opened, and has valid frames and matching resolution."""
     if not file_path.is_file() or file_path.stat().st_size < 10000:
         return False
     try:
         container = av.open(str(file_path))
         video_stream = container.streams.video[0]
         frames = video_stream.frames
+        width = video_stream.width
+        height = video_stream.height
         container.close()
         if expected_frames is not None and frames != expected_frames:
             print(f"Warning: {file_path} has {frames} frames, expected {expected_frames}")
+            return False
+        if expected_width is not None and width != expected_width:
+            print(f"Info: {file_path} width {width} != expected {expected_width} (requires regeneration)")
+            return False
+        if expected_height is not None and height != expected_height:
+            print(f"Info: {file_path} height {height} != expected {expected_height} (requires regeneration)")
+            return False
         return frames > 0
     except Exception as e:
         print(f"Error checking {file_path}: {e}")
@@ -243,12 +260,12 @@ def extract_preview_frames(
 
 @torch.inference_mode()
 def render_scene(
-    pipeline: DistilledPipeline,
+    pipeline: TI2VidTwoStagesHQPipeline,
     sc: dict[str, Any],
     args: argparse.Namespace,
     scene_output: Path,
 ) -> None:
-    """Render a single scene using LTX-2.5 and encode to MP4 under inference_mode."""
+    """Render a single scene using LTX-2.5 TI2VidTwoStagesHQPipeline and encode to MP4."""
     scene_t0 = time.time()
     images = [
         ImageConditioningInput(
@@ -258,14 +275,37 @@ def render_scene(
         )
     ]
 
+    video_guider_params = MultiModalGuiderParams(
+        cfg_scale=args.video_cfg_guidance_scale,
+        stg_scale=args.video_stg_guidance_scale,
+        rescale_scale=args.video_rescale_scale,
+        modality_scale=args.a2v_guidance_scale,
+        skip_step=0,
+        stg_blocks=[28] if args.video_stg_guidance_scale > 0 else [],
+    )
+    audio_guider_params = MultiModalGuiderParams(
+        cfg_scale=args.audio_cfg_guidance_scale,
+        stg_scale=0.0,
+        rescale_scale=1.0,
+        modality_scale=3.0,
+        skip_step=0,
+        stg_blocks=[],
+    )
+
     result = pipeline(
         prompt=sc["prompt"],
+        negative_prompt=args.negative_prompt,
         seed=sc["seed"],
         height=args.height,
         width=args.width,
         num_frames=sc["num_frames"],
         frame_rate=args.frame_rate,
+        num_inference_steps=args.num_inference_steps,
+        video_guider_params=video_guider_params,
+        audio_guider_params=audio_guider_params,
         images=images,
+        enhance_prompt=False,
+        tiling_config=AUTO_TILING,
     )
 
     encode_video(
@@ -283,7 +323,7 @@ def render_scene(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate full SMU commercial with LTX-2.5")
+    parser = argparse.ArgumentParser(description="Generate full SMU commercial with LTX-2.5 (High Quality Two-Stage)")
     parser.add_argument(
         "--models-dir",
         type=Path,
@@ -311,14 +351,68 @@ def main() -> None:
     parser.add_argument(
         "--height",
         type=int,
-        default=1024,
-        help="Output video height (divisible by 64)",
+        default=1088,
+        help="Output video height (divisible by 64, default 1088 for 1080p widescreen)",
     )
     parser.add_argument(
         "--width",
         type=int,
-        default=1536,
-        help="Output video width (divisible by 64)",
+        default=1920,
+        help="Output video width (divisible by 64, default 1920 for 1080p widescreen)",
+    )
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        default=15,
+        help="Number of res2s inference steps (default: 15, equivalent to 30 function evaluations)",
+    )
+    parser.add_argument(
+        "--video-cfg-guidance-scale",
+        type=float,
+        default=3.0,
+        help="Classifier-free guidance (CFG) scale for video (default: 3.0)",
+    )
+    parser.add_argument(
+        "--video-stg-guidance-scale",
+        type=float,
+        default=0.0,
+        help="Spatio-temporal guidance (STG) scale for video (default: 0.0)",
+    )
+    parser.add_argument(
+        "--video-rescale-scale",
+        type=float,
+        default=0.7,
+        help="Video guidance rescale scale to prevent oversaturation (default: 0.7)",
+    )
+    parser.add_argument(
+        "--audio-cfg-guidance-scale",
+        type=float,
+        default=7.0,
+        help="CFG scale for audio (default: 7.0)",
+    )
+    parser.add_argument(
+        "--a2v-guidance-scale",
+        type=float,
+        default=3.0,
+        help="Audio-to-video cross-modality guidance scale (default: 3.0)",
+    )
+    parser.add_argument(
+        "--distilled-lora-strength-stage-1",
+        type=float,
+        default=0.0,
+        help="Distilled LoRA strength in Stage 1 (default: 0.0, uses pure base dev model)",
+    )
+    parser.add_argument(
+        "--distilled-lora-strength-stage-2",
+        type=float,
+        default=0.8,
+        help="Distilled LoRA strength in Stage 2 super-resolution refinement (default: 0.8)",
+    )
+    parser.add_argument(
+        "--negative-prompt",
+        type=str,
+        default=DEFAULT_NEGATIVE_PROMPT,
+        help="Negative prompt for CFG denoising",
     )
     parser.add_argument(
         "--frame-rate",
@@ -365,19 +459,24 @@ def main() -> None:
         scenes_pending = []
         for sc in scenes_to_run:
             scene_output = args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4"
-            if args.force or not is_video_valid(scene_output, sc["num_frames"]):
+            if args.force or not is_video_valid(
+                scene_output, sc["num_frames"], args.width, args.height
+            ):
                 scenes_pending.append(sc)
             else:
-                print(f"[SKIP] Scene {sc['id']}: {sc['name']} already exists and is valid.", flush=True)
+                print(
+                    f"[SKIP] Scene {sc['id']}: {sc['name']} already exists at {args.width}x{args.height} and is valid.",
+                    flush=True,
+                )
 
         if scenes_pending:
-            print(f"\nInitializing LTX-2.5 DistilledPipeline on {torch.cuda.get_device_name(0)}...", flush=True)
+            print(f"\nInitializing LTX-2.5 TI2VidTwoStagesHQPipeline on {torch.cuda.get_device_name(0)}...", flush=True)
             t0 = time.time()
 
             model_paths = ModelPaths.from_split(
                 transformer_path=str(
                     args.models_dir
-                    / "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
+                    / "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors"
                 ),
                 text_encoder_path=str(
                     args.models_dir / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
@@ -389,14 +488,28 @@ def main() -> None:
                 args.models_dir
                 / "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
             )
+            distilled_lora_path = str(
+                args.models_dir
+                / "loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+            )
+            distilled_lora = [
+                LoraPathStrengthAndSDOps(
+                    path=distilled_lora_path,
+                    strength=1.0,
+                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                )
+            ]
 
-            pipeline = DistilledPipeline(
+            pipeline = TI2VidTwoStagesHQPipeline(
                 model_paths=model_paths,
+                distilled_lora=distilled_lora,
+                distilled_lora_strength_stage_1=args.distilled_lora_strength_stage_1,
+                distilled_lora_strength_stage_2=args.distilled_lora_strength_stage_2,
                 spatial_upsampler_path=spatial_upsampler_path,
                 loras=(),
                 offload_mode=OffloadMode.CPU,
             )
-            print(f"Pipeline initialized in {time.time() - t0:.2f}s.", flush=True)
+            print(f"HQ Pipeline initialized in {time.time() - t0:.2f}s.", flush=True)
 
             total_pending = len(scenes_pending)
             for idx, sc in enumerate(scenes_pending, 1):
