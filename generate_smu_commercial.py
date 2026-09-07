@@ -448,9 +448,9 @@ def main() -> None:
     parser.add_argument(
         "--quantization",
         type=str,
-        default=None,
+        default="fp8-cast",
         choices=["fp8-cast", "fp8-scaled-mm", "nvfp4-cast", "nvfp4-prequant"],
-        help="Quantization policy: fp8-cast, fp8-scaled-mm, nvfp4-cast, nvfp4-prequant",
+        help="Quantization policy: fp8-cast (default, 64GB RAM/32GB VRAM), fp8-scaled-mm, nvfp4-cast, nvfp4-prequant",
     )
     parser.add_argument(
         "--force",
@@ -525,6 +525,15 @@ def main() -> None:
 
             quant_policy = None
             if args.quantization:
+                if args.quantization in ("nvfp4-cast", "nvfp4-prequant"):
+                    if torch.cuda.is_available():
+                        major, minor = torch.cuda.get_device_capability(0)
+                        if major < 10:
+                            raise RuntimeError(
+                                f"NVFP4 quantization requires NVIDIA Blackwell architecture (SM >= 10.0) with hardware FP4 tensor cores. "
+                                f"Current device is {torch.cuda.get_device_name(0)} (sm_{major}{minor}). "
+                                f"Please use '--quantization fp8-cast' or '--quantization fp8-scaled-mm' instead."
+                            )
                 from ltx_pipelines.utils.quantization_factory import QuantizationKind
                 quant_kind = QuantizationKind(args.quantization)
                 quant_policy = quant_kind.to_policy(checkpoint_path=transformer_path)
@@ -562,7 +571,12 @@ def main() -> None:
 
             print("\nAll pending scenes generated successfully!", flush=True)
         else:
-            print("\nAll requested scenes are already generated.", flush=True)
+            print("\n" + "=" * 70, flush=True)
+            print("NOTICE: All requested scenes already exist in outputs/smu_scenes/ and are valid.", flush=True)
+            print("Skipping AI diffusion generation. (Job did not fail; cache validation succeeded).", flush=True)
+            print("To force re-rendering of existing scenes, run with: --force", flush=True)
+            print("Or to re-render a specific scene, run with: --scene-id <1-7> --force", flush=True)
+            print("=" * 70 + "\n", flush=True)
 
     # Extract preview frames
     extract_preview_frames(args.scenes_dir, SCENES, previews_dir)
