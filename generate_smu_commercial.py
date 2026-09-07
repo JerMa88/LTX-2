@@ -36,10 +36,12 @@ SCENES = [
         "id": 1,
         "name": "01_dallas_hall",
         "image": "inputs/smu/01_dallas_hall.jpg",
+        "voiceover": "At Southern Methodist University, heritage meets the horizon.",
         "prompt": (
             "A majestic, slow, cinematic forward camera dolly toward Dallas Hall on the Southern Methodist University "
             "campus, lush green lawn, warm bright morning sunlight casting gentle shadows on the historic red brick "
-            "and neoclassical white columns and dome, vibrant blue sky, gentle breeze swaying tree branches, collegiate excellence."
+            "and neoclassical white columns and dome, vibrant blue sky, gentle breeze swaying tree branches, collegiate excellence. "
+            "A warm, inspiring narrator voiceover articulates clearly: 'At Southern Methodist University, heritage meets the horizon.'"
         ),
         "num_frames": 121,
         "seed": 42,
@@ -48,10 +50,12 @@ SCENES = [
         "id": 2,
         "name": "02_mustang_statue",
         "image": "inputs/smu/02_mustang_statue.jpg",
+        "voiceover": "In the heart of Dallas, bold ideas take flight.",
         "prompt": (
             "A dynamic, heroic low-angle orbital camera pan around the bronze Mustang statue fountain on the SMU campus, "
             "crystal clear water splashing dynamically in slow motion, glistening water droplets, powerful bronze horse "
-            "sculptures conveying unstoppable energy and Mustang pride, dramatic cinematic lighting."
+            "sculptures conveying unstoppable energy and Mustang pride, dramatic cinematic lighting. "
+            "A resonant, inspiring narrator voiceover delivers the line: 'In the heart of Dallas, bold ideas take flight.'"
         ),
         "num_frames": 121,
         "seed": 101,
@@ -60,10 +64,12 @@ SCENES = [
         "id": 3,
         "name": "03_engineering_lab",
         "image": "inputs/smu/03_engineering_lab.jpg",
+        "voiceover": "Here, innovators sculpt tomorrow's breakthroughs in artificial intelligence and robotics.",
         "prompt": (
             "A smooth cinematic tracking shot inside the modern SMU Lyle School of Engineering robotics laboratory, "
             "engaged students collaborating with robotic arms and advanced technology, illuminated LED displays, "
-            "futuristic computer monitors showing engineering data, clean high-tech research atmosphere."
+            "futuristic computer monitors showing engineering data, clean high-tech research atmosphere. "
+            "An articulate, confident narrator voiceover states: 'Here, innovators sculpt tomorrow's breakthroughs in artificial intelligence and robotics.'"
         ),
         "num_frames": 121,
         "seed": 202,
@@ -72,10 +78,12 @@ SCENES = [
         "id": 4,
         "name": "04_business_cox",
         "image": "inputs/smu/04_business_cox.jpg",
+        "voiceover": "Visionaries lead global commerce with unyielding integrity.",
         "prompt": (
             "An elegant, steady gliding camera shot through the sunlit atrium of the SMU Cox School of Business, "
             "polished limestone floors reflecting natural light, soaring glass windows, professional students engaged "
-            "in dynamic discussion, inspiring academic and leadership atmosphere, warm architectural lighting."
+            "in dynamic discussion, inspiring academic and leadership atmosphere, warm architectural lighting. "
+            "A distinguished, poised narrator voiceover speaks: 'Visionaries lead global commerce with unyielding integrity.'"
         ),
         "num_frames": 121,
         "seed": 303,
@@ -84,10 +92,12 @@ SCENES = [
         "id": 5,
         "name": "05_meadows_arts",
         "image": "inputs/smu/05_meadows_arts.jpg",
+        "voiceover": "Artists inspire, and culture thrives.",
         "prompt": (
             "A graceful, fluid cinematic camera crane shot across the SMU Meadows School of the Arts plaza, "
             "contemporary outdoor sculptures, vibrant artistic architecture, creative energy, gentle afternoon golden "
-            "sunlight highlighting modern art installations and students walking by."
+            "sunlight highlighting modern art installations and students walking by. "
+            "An expressive, uplifting narrator voiceover proclaims: 'Artists inspire, and culture thrives.'"
         ),
         "num_frames": 121,
         "seed": 404,
@@ -96,10 +106,12 @@ SCENES = [
         "id": 6,
         "name": "06_campus_sunset",
         "image": "inputs/smu/06_campus_sunset.jpg",
+        "voiceover": "Fueled by unbridled Mustang spirit, we don't just dream of a better world. We build it.",
         "prompt": (
             "A breathtaking wide cinematic aerial gliding shot over the Southern Methodist University campus during a "
             "spectacular golden hour sunset, rich amber and purple sky reflecting off campus pathways, tree-lined walkways "
-            "illuminated by warm campus lampposts, timeless collegiate beauty and wonder."
+            "illuminated by warm campus lampposts, timeless collegiate beauty and wonder. "
+            "A passionate, resonant narrator voiceover delivers with conviction: 'Fueled by unbridled Mustang spirit, we don't just dream of a better world. We build it.'"
         ),
         "num_frames": 121,
         "seed": 505,
@@ -108,12 +120,14 @@ SCENES = [
         "id": 7,
         "name": "07_closing_logo",
         "image": "inputs/smu/07_closing_logo.jpg",
+        "voiceover": "Southern Methodist University. World changers shaped here. Pony up!",
         "prompt": (
             "A sleek, premium broadcast commercial title card animation, slow subtle zoom into the official Southern "
             "Methodist University Mustang logo and typography, soft cinematic lens flare and ambient light rays dancing "
-            "across the iconic blue and red collegiate crest, pristine and inspiring conclusion."
+            "across the iconic blue and red collegiate crest, pristine and inspiring conclusion. "
+            "A confident, inspiring narrator voiceover concludes emphatically: 'Southern Methodist University. World changers shaped here. Pony up!'"
         ),
-        "num_frames": 129,  # 129 frames brings total duration to 855 frames (35.625s), perfectly syncing with 35.59s voiceover
+        "num_frames": 121,
         "seed": 606,
     },
 ]
@@ -152,11 +166,11 @@ def is_video_valid(
 
 def assemble_commercial(
     scenes_dir: Path,
-    voiceover_path: Path,
+    voiceover_path: Path | None,
     output_path: Path,
     scenes: list[dict[str, Any]],
 ) -> None:
-    """Concatenate scenes and multiplex voiceover track using imageio_ffmpeg binary."""
+    """Concatenate scenes and optionally multiplex voiceover track using imageio_ffmpeg binary."""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     concat_list_file = scenes_dir / "concat_list.txt"
 
@@ -180,36 +194,76 @@ def assemble_commercial(
     print(f"Concat list written to {concat_list_file}")
 
     # Run FFmpeg concat and audio mux
-    cmd = [
-        ffmpeg_exe,
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_list_file),
-        "-i",
-        str(voiceover_path.resolve()),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "fast",
-        "-crf",
-        "18",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-shortest",
-        str(output_path.resolve()),
-    ]
+    if voiceover_path is not None and voiceover_path.is_file():
+        print(f"Multiplexing external voiceover track: {voiceover_path}")
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_file),
+            "-i",
+            str(voiceover_path.resolve()),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-shortest",
+            str(output_path.resolve()),
+        ]
+    else:
+        print("No external voiceover file used. Preserving LTX-2.5 synthesized scene audio.")
+        has_audio = False
+        try:
+            test_c = av.open(str(scene_files[0]))
+            has_audio = len(test_c.streams.audio) > 0
+            test_c.close()
+        except Exception:
+            pass
+
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_file),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+        ]
+        if has_audio:
+            cmd.extend([
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ])
+        else:
+            cmd.append("-an")
+        cmd.append(str(output_path.resolve()))
 
     print("Running FFmpeg command:")
     print(" ".join(cmd))
@@ -224,11 +278,14 @@ def assemble_commercial(
     # Validate output
     container = av.open(str(output_path))
     v_stream = container.streams.video[0]
-    a_stream = container.streams.audio[0]
     duration = float(v_stream.duration * v_stream.time_base)
     print(f"Output Video Resolution: {v_stream.width}x{v_stream.height}")
     print(f"Output Video Frames: {v_stream.frames} ({duration:.2f} seconds)")
-    print(f"Output Audio Sample Rate: {a_stream.rate}Hz, Channels: {a_stream.channels}")
+    if len(container.streams.audio) > 0:
+        a_stream = container.streams.audio[0]
+        print(f"Output Audio Sample Rate: {a_stream.rate}Hz, Channels: {a_stream.channels}")
+    else:
+        print("Output has no audio track.")
     container.close()
 
 
@@ -343,6 +400,17 @@ def main() -> None:
         type=Path,
         default=Path("inputs/smu"),
         help="Directory containing input images and voiceover",
+    )
+    parser.add_argument(
+        "--voiceover-path",
+        type=Path,
+        default=None,
+        help="Path to external voiceover audio file (defaults to inputs-dir/smu_voiceover.wav if it exists)",
+    )
+    parser.add_argument(
+        "--no-voiceover",
+        action="store_true",
+        help="Do not multiplex external voiceover track; preserve audio synthesized by LTX-2.5",
     )
     parser.add_argument(
         "--outputs-dir",
@@ -469,9 +537,19 @@ def main() -> None:
         if not scenes_to_run:
             raise ValueError(f"Invalid scene ID: {args.scene_id}. Must be 1-7.")
 
-    voiceover_path = args.inputs_dir / "smu_voiceover.wav"
-    if not voiceover_path.is_file():
-        raise FileNotFoundError(f"Voiceover not found at {voiceover_path}")
+    voiceover_path = None
+    if not args.no_voiceover:
+        if args.voiceover_path is not None:
+            if args.voiceover_path.is_file():
+                voiceover_path = args.voiceover_path
+            else:
+                print(f"Warning: Specified voiceover file not found at {args.voiceover_path}. Continuing without external voiceover.", flush=True)
+        else:
+            default_voiceover = args.inputs_dir / "smu_voiceover.wav"
+            if default_voiceover.is_file():
+                voiceover_path = default_voiceover
+            else:
+                print(f"Info: External voiceover file not found at {default_voiceover}. Assembly will preserve LTX-2.5 synthesized scene audio.", flush=True)
 
     master_output = args.outputs_dir / "smu_commercial_full.mp4"
 
