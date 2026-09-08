@@ -75,7 +75,9 @@ public:
    * @param error Description of the error
    */
   explicit EPException(const char *name, const char *file, const int line, const std::string &error) {
-    message = std::string("Failed: ") + name + " error " + file + ":" + std::to_string(line) + " '" + error + "'";
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "Failed: %s error %s:%d '%s'", name, file, line, error.c_str());
+    message = buf;
   }
 
   /**
@@ -132,7 +134,7 @@ public:
 #ifndef EP_HOST_ASSERT
 #define EP_HOST_ASSERT(cond)                                                                                           \
   do {                                                                                                                 \
-    if (not(cond)) {                                                                                                   \
+    if (!(cond)) {                                                                                                     \
       throw EPException("Assertion", __FILE__, __LINE__, #cond);                                                       \
     }                                                                                                                  \
   } while (0)
@@ -162,7 +164,7 @@ public:
 #ifndef EP_DEVICE_ASSERT
 #define EP_DEVICE_ASSERT(cond)                                                                                         \
   do {                                                                                                                 \
-    if (not(cond)) {                                                                                                   \
+    if (!(cond)) {                                                                                                     \
       printf("Assertion failed: %s:%d, condition: %s\n", __FILE__, __LINE__, #cond);                                   \
       asm("trap;");                                                                                                    \
     }                                                                                                                  \

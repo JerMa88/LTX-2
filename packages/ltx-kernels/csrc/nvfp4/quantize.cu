@@ -5,15 +5,15 @@
 // the payload with the hardware `cvt.rn.satfinite.e2m1x2.f32` path, and stores the scale
 // directly at its swizzled (cuBLAS 128x4 tiled) address -- no separate `to_blocked` pass.
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <cfloat>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
+#include <cuda_runtime.h>
+#include <stdint.h>
 
-#include "nvfp4.h"
+#include "nvfp4_kernel.h"
 
 namespace ltx_nvfp4 {
 namespace {
@@ -280,21 +280,12 @@ __global__ void mul_scalars_kernel(const float *a, const float *b, float *out) {
 
 // ---------------------------------------------------------------------------
 // Fused |amax| / divisor -- the per-tensor decode scale in one pass.
-//
-// `x.float().abs().nan_to_num().amax() / divisor` in ATen is three passes over the
-// activation plus five scalar launches. This is one pass with 16-byte loads.
-//
-// NaN/inf handling matches `nan_to_num`: NaN contributes nothing (CUDA `fmaxf` returns
-// the non-NaN operand) and +-inf saturates to FLT_MAX. Dividing by a positive `divisor`
-// is monotonic on non-negative reals, so we can fold it in before the atomic and skip a
-// follow-up kernel.
 // ---------------------------------------------------------------------------
 constexpr int kAmaxThreads = 256;
 constexpr int kAmaxMaxBlocks = 1024;
 
 __device__ __forceinline__ float sanitize_abs(float v) {
   const float a = fabsf(v);
-  // NaN fails both comparisons, so it survives here and is dropped by the fmaxf below.
   return a > FLT_MAX ? FLT_MAX : a;
 }
 
@@ -345,141 +336,94 @@ __global__ void amax_scale_kernel(const T *__restrict__ x, int64_t numel, float 
   }
 }
 
-int64_t ceil_div(int64_t a, int64_t b) { return (a + b - 1) / b; }
+static inline int64_t ceil_div(int64_t a, int64_t b) { return (a + b - 1) / b; }
 
 } // namespace
 
-void quantize_nvfp4_cuda(const torch::Tensor &x, const torch::Tensor &per_tensor_scale, torch::Tensor &out_packed,
-                         torch::Tensor &out_scales, bool hi_first, int64_t variant) {
-  TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(), "x must be 2-D contiguous CUDA");
-  TORCH_CHECK(x.size(1) % kBlockSize == 0, "K must be a multiple of 16, got ", x.size(1));
-  TORCH_CHECK(per_tensor_scale.is_cuda() && per_tensor_scale.scalar_type() == torch::kFloat32,
-              "per_tensor_scale must be a CUDA fp32 scalar");
-  TORCH_CHECK(per_tensor_scale.numel() == 1, "per_tensor_scale must hold one element");
-
-  const int rows = static_cast<int>(x.size(0));
-  const int blocks_per_row = static_cast<int>(x.size(1) / kBlockSize);
-  const int padded_scale_cols = static_cast<int>(out_scales.size(1));
-  TORCH_CHECK(padded_scale_cols % 4 == 0, "scale columns must be padded to a multiple of 4");
-
-  const c10::cuda::CUDAGuard guard(x.device());
+void quantize_launch(DType dtype, const void* x, const float* per_tensor_scale,
+                     uint8_t* out, uint8_t* scales, int rows, int blocks_per_row,
+                     int padded_scale_cols, bool hi_first, int64_t variant,
+                     cudaStream_t stream) {
   const int64_t total_blocks = static_cast<int64_t>(rows) * blocks_per_row;
   const int64_t threads_needed = ceil_div(total_blocks, kBlocksPerThread);
   const dim3 grid(static_cast<unsigned>(ceil_div(threads_needed, kThreads)));
   const dim3 tiled_grid(static_cast<unsigned>(padded_scale_cols / kTileCols),
                         static_cast<unsigned>(ceil_div(rows, kTileRows)));
-  auto stream = at::cuda::getCurrentCUDAStream();
 
-  const float *pts = per_tensor_scale.data_ptr<float>();
-  uint8_t *out = out_packed.data_ptr<uint8_t>();
-  uint8_t *sc = out_scales.data_ptr<uint8_t>();
-
-#define LTX_LAUNCH_QUANT(T, HI)                                                                                        \
-  (variant == 1                                                                                                        \
-       ? quantize_kernel<T, HI><<<grid, kThreads, 0, stream>>>(reinterpret_cast<const T *>(x.data_ptr()), pts, out,    \
-                                                               sc, rows, blocks_per_row, padded_scale_cols)            \
-       : quantize_tiled_kernel<T, HI><<<tiled_grid, kTileThreads, 0, stream>>>(                                        \
-             reinterpret_cast<const T *>(x.data_ptr()), pts, out, sc, rows, blocks_per_row, padded_scale_cols))
-
-  switch (x.scalar_type()) {
-  case torch::kBFloat16:
-    hi_first ? LTX_LAUNCH_QUANT(__nv_bfloat16, true) : LTX_LAUNCH_QUANT(__nv_bfloat16, false);
-    break;
-  case torch::kHalf:
-    hi_first ? LTX_LAUNCH_QUANT(__half, true) : LTX_LAUNCH_QUANT(__half, false);
-    break;
-  case torch::kFloat32:
-    hi_first ? LTX_LAUNCH_QUANT(float, true) : LTX_LAUNCH_QUANT(float, false);
-    break;
-  default:
-    TORCH_CHECK(false, "quantize_nvfp4 supports bf16/fp16/fp32, got ", x.scalar_type());
+#define LAUNCH_Q(T)                                                                                                    \
+  if (variant == 1) {                                                                                                  \
+    if (hi_first)                                                                                                      \
+      quantize_kernel<T, true><<<grid, kThreads, 0, stream>>>(reinterpret_cast<const T *>(x), per_tensor_scale, out,    \
+                                                              scales, rows, blocks_per_row, padded_scale_cols);        \
+    else                                                                                                               \
+      quantize_kernel<T, false><<<grid, kThreads, 0, stream>>>(reinterpret_cast<const T *>(x), per_tensor_scale, out,   \
+                                                               scales, rows, blocks_per_row, padded_scale_cols);       \
+  } else {                                                                                                             \
+    if (hi_first)                                                                                                      \
+      quantize_tiled_kernel<T, true><<<tiled_grid, kTileThreads, 0, stream>>>(                                         \
+          reinterpret_cast<const T *>(x), per_tensor_scale, out, scales, rows, blocks_per_row, padded_scale_cols);      \
+    else                                                                                                               \
+      quantize_tiled_kernel<T, false><<<tiled_grid, kTileThreads, 0, stream>>>(                                        \
+          reinterpret_cast<const T *>(x), per_tensor_scale, out, scales, rows, blocks_per_row, padded_scale_cols);      \
   }
-#undef LTX_LAUNCH_QUANT
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (dtype == DType::BF16) {
+    LAUNCH_Q(__nv_bfloat16);
+  } else if (dtype == DType::FP16) {
+    LAUNCH_Q(__half);
+  } else {
+    LAUNCH_Q(float);
+  }
+#undef LAUNCH_Q
 }
 
-void dequantize_nvfp4_cuda(const torch::Tensor &packed, const torch::Tensor &per_tensor_scale,
-                           const torch::Tensor &scales, torch::Tensor &out, bool hi_first) {
-  TORCH_CHECK(packed.is_cuda() && packed.dim() == 2 && packed.is_contiguous(), "packed must be 2-D contiguous CUDA");
-  const int rows = static_cast<int>(packed.size(0));
-  const int blocks_per_row = static_cast<int>(packed.size(1) * 2 / kBlockSize);
-  const int padded_scale_cols = static_cast<int>(scales.size(1));
-
-  const c10::cuda::CUDAGuard guard(packed.device());
+void dequantize_launch(DType dtype, const uint8_t* packed, const float* per_tensor_scale,
+                       const uint8_t* scales, void* out, int rows, int blocks_per_row,
+                       int padded_scale_cols, bool hi_first, cudaStream_t stream) {
   const int64_t total_blocks = static_cast<int64_t>(rows) * blocks_per_row;
   const dim3 grid(static_cast<unsigned>(ceil_div(total_blocks, kThreads)));
-  auto stream = at::cuda::getCurrentCUDAStream();
 
-#define LTX_LAUNCH_DEQUANT(T, HI)                                                                                      \
-  dequantize_kernel<T, HI><<<grid, kThreads, 0, stream>>>(                                                             \
-      packed.data_ptr<uint8_t>(), per_tensor_scale.data_ptr<float>(), scales.data_ptr<uint8_t>(),                      \
-      reinterpret_cast<T *>(out.data_ptr()), rows, blocks_per_row, padded_scale_cols)
+#define LAUNCH_DQ(T)                                                                                                   \
+  if (hi_first)                                                                                                        \
+    dequantize_kernel<T, true><<<grid, kThreads, 0, stream>>>(packed, per_tensor_scale, scales,                         \
+                                                              reinterpret_cast<T *>(out), rows, blocks_per_row,        \
+                                                              padded_scale_cols);                                      \
+  else                                                                                                                 \
+    dequantize_kernel<T, false><<<grid, kThreads, 0, stream>>>(packed, per_tensor_scale, scales,                        \
+                                                               reinterpret_cast<T *>(out), rows, blocks_per_row,       \
+                                                               padded_scale_cols);
 
-  switch (out.scalar_type()) {
-  case torch::kBFloat16:
-    hi_first ? LTX_LAUNCH_DEQUANT(__nv_bfloat16, true) : LTX_LAUNCH_DEQUANT(__nv_bfloat16, false);
-    break;
-  case torch::kFloat32:
-    hi_first ? LTX_LAUNCH_DEQUANT(float, true) : LTX_LAUNCH_DEQUANT(float, false);
-    break;
-  default:
-    TORCH_CHECK(false, "dequantize_nvfp4 supports bf16/fp32 out, got ", out.scalar_type());
+  if (dtype == DType::BF16) {
+    LAUNCH_DQ(__nv_bfloat16);
+  } else {
+    LAUNCH_DQ(float);
   }
-#undef LTX_LAUNCH_DEQUANT
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+#undef LAUNCH_DQ
 }
 
-void amax_scale_cuda(const torch::Tensor &x, torch::Tensor &out, double divisor) {
-  TORCH_CHECK(x.is_cuda() && x.is_contiguous(), "amax input must be contiguous CUDA");
-  TORCH_CHECK(out.is_cuda() && out.scalar_type() == torch::kFloat32 && out.numel() == 1,
-              "amax out must be a CUDA fp32 scalar");
-  TORCH_CHECK(divisor > 0.0, "divisor must be positive, got ", divisor);
+void mul_scalars_launch(const float* a, const float* b, float* out, cudaStream_t stream) {
+  mul_scalars_kernel<<<1, 1, 0, stream>>>(a, b, out);
+}
 
-  const c10::cuda::CUDAGuard guard(x.device());
-  auto stream = at::cuda::getCurrentCUDAStream();
-  float *out_ptr = out.data_ptr<float>();
-
-  // atomicMax accumulates, so the target must start at zero. memsetAsync is stream-ordered
-  // and graph-capturable, and beats a torch::zeros fill launch.
-  C10_CUDA_CHECK(cudaMemsetAsync(out_ptr, 0, sizeof(float), stream));
-
-  const int64_t numel = x.numel();
-  if (numel == 0)
-    return;
-
-  const float inv_divisor = static_cast<float>(1.0 / divisor);
-
-#define LTX_LAUNCH_AMAX(T)                                                                                             \
+void amax_scale_launch(DType dtype, const void* x, int64_t numel, float inv_divisor,
+                       float* out, cudaStream_t stream) {
+#define LAUNCH_AMAX(T)                                                                                                 \
   do {                                                                                                                 \
     const int64_t nvec = numel / Vec16B<T>::kElems;                                                                    \
     const int64_t want = ceil_div(nvec > 0 ? nvec : 1, kAmaxThreads);                                                  \
     const unsigned blocks = static_cast<unsigned>(want < kAmaxMaxBlocks ? (want > 0 ? want : 1) : kAmaxMaxBlocks);     \
     amax_scale_kernel<T>                                                                                               \
-        <<<blocks, kAmaxThreads, 0, stream>>>(reinterpret_cast<const T *>(x.data_ptr()), numel, inv_divisor, out_ptr); \
+        <<<blocks, kAmaxThreads, 0, stream>>>(reinterpret_cast<const T *>(x), numel, inv_divisor, out);                \
   } while (0)
 
-  switch (x.scalar_type()) {
-  case torch::kBFloat16:
-    LTX_LAUNCH_AMAX(__nv_bfloat16);
-    break;
-  case torch::kHalf:
-    LTX_LAUNCH_AMAX(__half);
-    break;
-  case torch::kFloat32:
-    LTX_LAUNCH_AMAX(float);
-    break;
-  default:
-    TORCH_CHECK(false, "amax_scale supports bf16/fp16/fp32, got ", x.scalar_type());
+  if (dtype == DType::BF16) {
+    LAUNCH_AMAX(__nv_bfloat16);
+  } else if (dtype == DType::FP16) {
+    LAUNCH_AMAX(__half);
+  } else {
+    LAUNCH_AMAX(float);
   }
-#undef LTX_LAUNCH_AMAX
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-void mul_scalars_cuda(const torch::Tensor &a, const torch::Tensor &b, torch::Tensor &out) {
-  const c10::cuda::CUDAGuard guard(a.device());
-  mul_scalars_kernel<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(a.data_ptr<float>(), b.data_ptr<float>(),
-                                                                    out.data_ptr<float>());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+#undef LAUNCH_AMAX
 }
 
 } // namespace ltx_nvfp4

@@ -11,11 +11,14 @@
 #include "sm89_fp8_gemm_1d2d.hpp"
 
 namespace blockwise{
+template <typename T, size_t... Is>
+static auto get_shape_impl(const T& t, std::index_sequence<Is...>) {
+    return std::make_tuple(static_cast<int>(t.sizes()[Is])...);
+}
+
 template <int N>
 static auto get_shape(const torch::Tensor& t) {
-    return [&t] <size_t... Is> (std::index_sequence<Is...>) {
-        return std::make_tuple(static_cast<int>(t.sizes()[Is])...);
-    }(std::make_index_sequence<N>());
+    return get_shape_impl(t, std::make_index_sequence<N>());
 }
 
 #ifdef __SM90__

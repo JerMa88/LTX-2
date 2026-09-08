@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -34,11 +35,18 @@ ROOT = Path(__file__).resolve().parent
 
 
 def _cuda_lib_dirs() -> list[Path]:
-    """Real lib dirs under CUDA_HOME (pip wheels use ``lib/``, system toolkits ``lib64/``)."""
+    """Real lib dirs under CUDA_HOME (pip wheels use ``lib/``, system toolkits ``lib64/``, Windows ``lib/x64``)."""
     if CUDA_HOME is None:
         return []
     home = Path(CUDA_HOME)
-    return [p for p in (home / "lib", home / "lib64", home / "lib64" / "stubs", home / "lib" / "stubs") if p.is_dir()]
+    candidates = [
+        home / "lib",
+        home / "lib64",
+        home / "lib64" / "stubs",
+        home / "lib" / "stubs",
+        home / "lib" / "x64",
+    ]
+    return [p for p in candidates if p.is_dir()]
 
 
 def _system_cuda_stub_dirs() -> list[Path]:
@@ -57,16 +65,10 @@ def _system_cuda_stub_dirs() -> list[Path]:
 
 
 def _pip_cuda_link_dirs() -> list[str]:
-    """Library dirs for ``-lcudart`` / ``-lnvrtc`` / ``-lcuda`` against pip CUDA wheels.
-    Pip nvidia wheels ship versioned sonames only (``libcudart.so.13``) without the
-    unversioned ``libcudart.so`` that ``-lcudart`` expects. Rather than mutate
-    site-packages, stage relative symlinks in a build-local dir and put that first
-    on the linker search path. System toolkits already have unversioned names, so
-    the staging dir stays empty of conflicts and later dirs still work.
-    ``libcuda`` (driver) is never in the pip wheels; append system stub dirs for
-    ``-lcuda`` (blockwise).
-    """
+    """Library dirs for linking CUDA libraries."""
     real_dirs = _cuda_lib_dirs()
+    if sys.platform == "win32":
+        return [str(p) for p in real_dirs]
     stub_dirs = _system_cuda_stub_dirs()
     if not real_dirs and not stub_dirs:
         return []
@@ -138,13 +140,15 @@ def _arch_tokens() -> list[str]:
 # Blackwell codes are inert until built with CUDA 12.8+.
 # NOTE: the Blackwell (100a/120) path is implemented but not yet validated on real
 # Blackwell hardware -- needs a B200 + CUDA 12.8 build/run pass.
-_BLOCKWISE_ARCHES = ["89", "90a", "100a", "120"]
+_BLOCKWISE_ARCHES = ["89", "90a", "100a"]
 
 
 def _nvcc_arch_nums() -> set[str]:
     """Architecture numbers this nvcc can target, e.g. {'80', '86', '89', '90'}."""
     try:
-        out = subprocess.check_output([f"{CUDA_HOME}/bin/nvcc", "--list-gpu-arch"], text=True)
+        nvcc_bin = "nvcc.exe" if sys.platform == "win32" else "nvcc"
+        nvcc_cmd = str(Path(CUDA_HOME) / "bin" / nvcc_bin) if CUDA_HOME else nvcc_bin
+        out = subprocess.check_output([nvcc_cmd, "--list-gpu-arch"], text=True)
     except (OSError, subprocess.CalledProcessError):
         return set()
     return {m.group(1) for tok in out.split() if (m := re.match(r"compute_(\d+a?)$", tok.strip()))}
@@ -170,10 +174,8 @@ def _blockwise_gencode() -> tuple[list[str], bool]:
                 sel.append("90a")
             elif tok.startswith("10.0"):
                 sel.append("100a")
-            elif tok.startswith("12.0"):
-                sel.append("120")
-            # Ampere (8.0/8.6) and other arches have no fp8 blockwise kernel.
-        archs = [a for a in dict.fromkeys(sel) if a in base] or base
+            # Blackwell consumer (12.0) uses native NVFP4, not Cutlass FP8.
+        archs = [a for a in dict.fromkeys(sel) if a in base]
     else:
         archs = base
     flags = [f"-gencode=arch=compute_{a},code=sm_{a}" for a in archs]
@@ -181,14 +183,9 @@ def _blockwise_gencode() -> tuple[list[str], bool]:
 
 
 # Arch codes the NVFP4 kernels support. The E2M1 pack/convert intrinsics and the cuBLASLt
-# block-scaled FP4 kernels are Blackwell-only (sm_100a datacenter, sm_110a Jetson Thor,
-# sm_120a consumer).
-# All three are the arch-specific ("a") targets on purpose. cvt.rn.satfinite.e2m1x2.f32
-# -- the hardware BF16/FP32 -> E2M1 pair conversion behind __nv_cvt_float2_to_fp4x2 -- is
-# only emitted for those; on a plain family target (sm_110) the CUDA headers fall back to
-# a software emulation and the quantize kernel balloons from 360 to 1312 SASS instructions,
-# which drops it from memory-bound (~250 GB/s) to ALU-bound (~62 GB/s) on Thor.
-_NVFP4_ARCHES = ["100a", "110a", "120a"]
+# block-scaled FP4 kernels are Blackwell-only (sm_100/sm_100a datacenter, sm_110/sm_110a Jetson Thor,
+# sm_120/sm_120a consumer).
+_NVFP4_ARCHES = ["100", "100a", "110", "110a", "120", "120a"]
 
 
 def _nvfp4_gencode() -> list[str]:
@@ -197,16 +194,16 @@ def _nvfp4_gencode() -> list[str]:
     base = [a for a in _NVFP4_ARCHES if a in supported or a.rstrip("a") in supported]
     env = _arch_tokens()
     if not env:
-        return base
+        return [a for a in base if a in supported]
     sel = []
     for tok in env:
         if tok.startswith("10.0"):
-            sel.append("100a")
+            sel.append("100a" if "100a" in supported else "100")
         elif tok.startswith("11.0"):
-            sel.append("110a")
+            sel.append("110a" if "110a" in supported else "110")
         elif tok.startswith("12.0"):
-            sel.append("120a")
-    return [a for a in dict.fromkeys(sel) if a in base]
+            sel.append("120a" if "120a" in supported else "120")
+    return [a for a in dict.fromkeys(sel) if a in supported]
 
 
 def _cutlass_include() -> str:
@@ -250,22 +247,27 @@ if __name__ == "__main__":
 
     cuda_link_dirs = _pip_cuda_link_dirs()
     ext_modules = []
+    is_win = sys.platform == "win32"
+    cxx_opt = ["/O2", "/GL-"] if is_win else ["-O3"]
+    cxx_std = ["/std:c++17", "/permissive-"] if is_win else ["-std=c++17"]
+    common_cxx = [*cxx_opt, *cxx_std]
 
-    # all2all_cpp -- unchanged.
-    all2all_args = ["-O3", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-Wno-attributes"]
-    ext_modules.append(
-        CUDAExtension(
-            name="all2all_cpp",
-            include_dirs=[str(ROOT / "csrc/all2all"), str(ROOT / "csrc/include"), *_nvidia_include_dirs()],
-            sources=[
-                "csrc/all2all/all2all.cpp",
-                "csrc/all2all/cuda/all2all_heads.cu",
-                "csrc/all2all/cuda/allgather.cu",
-            ],
-            library_dirs=cuda_link_dirs,
-            extra_compile_args={"cxx": all2all_args, "nvcc": ["-O3"]},
+    # all2all_cpp -- Linux-only CUDA IPC communication.
+    all2all_args = common_cxx if is_win else ["-O3", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-Wno-attributes"]
+    if not is_win:
+        ext_modules.append(
+            CUDAExtension(
+                name="all2all_cpp",
+                include_dirs=[str(ROOT / "csrc/all2all"), str(ROOT / "csrc/include"), *_nvidia_include_dirs()],
+                sources=[
+                    "csrc/all2all/all2all.cpp",
+                    "csrc/all2all/cuda/all2all_heads.cu",
+                    "csrc/all2all/cuda/allgather.cu",
+                ],
+                library_dirs=cuda_link_dirs,
+                extra_compile_args={"cxx": all2all_args, "nvcc": ["-O3"]},
+            )
         )
-    )
 
     # ops_cpp -- arch-independent element ops (rms_norm_rope, rms_norm_split_rope,
     # fp6 pack/unpack). Arch is driven by TORCH_CUDA_ARCH_LIST / torch defaults.
@@ -284,7 +286,7 @@ if __name__ == "__main__":
             include_dirs=[str(ROOT / "csrc/ops/include"), *_nvidia_include_dirs()],
             library_dirs=cuda_link_dirs,
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
+                "cxx": common_cxx,
                 "nvcc": [
                     "-O3",
                     "-std=c++17",
@@ -314,8 +316,11 @@ if __name__ == "__main__":
         "csrc/blockwise/api.cpp",
         "csrc/blockwise/kernels/geforce/gemm.cu",
     ]
-    abi = f"-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}"
-    blockwise_cxx = ["-O3", "-std=c++17", "-fPIC", "-Wno-psabi", "-Wno-deprecated-declarations", abi]
+    if is_win:
+        blockwise_cxx = [*common_cxx]
+    else:
+        abi = f"-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}"
+        blockwise_cxx = ["-O3", "-std=c++17", "-fPIC", "-Wno-psabi", "-Wno-deprecated-declarations", abi]
     blockwise_nvcc = [
         "-O3",
         "-std=c++17",
@@ -334,23 +339,24 @@ if __name__ == "__main__":
         blockwise_cxx.append("-D__SM90__")
         blockwise_nvcc.append("-D__SM90__")
 
-    ext_modules.append(
-        CUDAExtension(
-            name="blockwise_cpp",
-            sources=blockwise_sources,
-            include_dirs=[
-                f"{CUDA_HOME}/include",
-                f"{CUDA_HOME}/include/cccl",
-                str(ROOT / "csrc/blockwise"),
-                str(ROOT / "csrc/blockwise/kernels/deep_gemm/include"),
-                cutlass_include,
-                *_nvidia_include_dirs(),
-            ],
-            libraries=["cuda", "cudart", "nvrtc"],
-            library_dirs=cuda_link_dirs,
-            extra_compile_args={"cxx": blockwise_cxx, "nvcc": blockwise_nvcc},
+    if gencode:
+        ext_modules.append(
+            CUDAExtension(
+                name="blockwise_cpp",
+                sources=blockwise_sources,
+                include_dirs=[
+                    f"{CUDA_HOME}/include",
+                    f"{CUDA_HOME}/include/cccl",
+                    str(ROOT / "csrc/blockwise"),
+                    str(ROOT / "csrc/blockwise/kernels/deep_gemm/include"),
+                    cutlass_include,
+                    *_nvidia_include_dirs(),
+                ],
+                libraries=["cuda", "cudart", "nvrtc"],
+                library_dirs=cuda_link_dirs,
+                extra_compile_args={"cxx": blockwise_cxx, "nvcc": blockwise_nvcc},
+            )
         )
-    )
 
     # nvfp4_cpp -- in-house NVFP4 quantize (CUDA) + block-scaled GEMM (cuBLASLt).
     # Blackwell-only: the E2M1/E4M3 conversion intrinsics and the cuBLASLt FP4 kernels
@@ -365,6 +371,7 @@ if __name__ == "__main__":
                 sources=[
                     "csrc/nvfp4/api.cpp",
                     "csrc/nvfp4/gemm.cpp",
+                    "csrc/nvfp4/quantize_host.cpp",
                     "csrc/nvfp4/quantize.cu",
                 ],
                 include_dirs=[
@@ -375,7 +382,7 @@ if __name__ == "__main__":
                 libraries=["cublasLt"],
                 library_dirs=cuda_link_dirs,
                 extra_compile_args={
-                    "cxx": ["-O3", "-std=c++17"],
+                    "cxx": common_cxx,
                     "nvcc": [
                         "-O3",
                         "-std=c++17",

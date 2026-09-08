@@ -1,7 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
-#include <torch/python.h>
 
 #include <vector>
 

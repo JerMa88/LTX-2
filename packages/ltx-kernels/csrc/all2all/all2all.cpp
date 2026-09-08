@@ -243,7 +243,7 @@ at::Tensor All2All::get_local_buffer_tensor(at::Tensor &x, int batch_size, int o
  */
 at::Tensor All2All::send_recv_heads(at::Tensor &x, bool copy_output) {
   // Validate input tensor properties
-  EP_HOST_ASSERT(x.dim() == 4 and x.is_contiguous());
+  EP_HOST_ASSERT(x.dim() == 4 && x.is_contiguous());
   EP_HOST_ASSERT(x.dtype() == tensor_dtype);
   EP_HOST_ASSERT(x.device().is_cuda());
   EP_HOST_ASSERT(x.device().index() == rank);
@@ -287,7 +287,7 @@ at::Tensor All2All::send_recv_heads(at::Tensor &x, bool copy_output) {
  */
 at::Tensor All2All::gather_heads(at::Tensor &x, bool copy_output) {
   // Validate input tensor properties
-  EP_HOST_ASSERT(x.dim() == 4 and x.is_contiguous());
+  EP_HOST_ASSERT(x.dim() == 4 && x.is_contiguous());
   EP_HOST_ASSERT(x.dtype() == tensor_dtype);
   EP_HOST_ASSERT(x.device().is_cuda());
   EP_HOST_ASSERT(x.device().index() == rank);
@@ -330,7 +330,7 @@ at::Tensor All2All::gather_heads(at::Tensor &x, bool copy_output) {
  */
 at::Tensor All2All::allgather(at::Tensor &x, bool copy_output) {
   // Validate input tensor properties
-  EP_HOST_ASSERT(x.dim() == 4 and x.is_contiguous());
+  EP_HOST_ASSERT(x.dim() == 4 && x.is_contiguous());
   EP_HOST_ASSERT(x.dtype() == tensor_dtype);
   EP_HOST_ASSERT(x.device().is_cuda());
   EP_HOST_ASSERT(x.device().index() == rank);

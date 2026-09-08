@@ -1,6 +1,5 @@
-// pybind surface for the in-house NVFP4 quantize + GEMM (see docs/NVFP4.md).
-
-#include <torch/extension.h>
+#include <torch/csrc/utils/pybind.h>
+#include <torch/types.h>
 
 #include "nvfp4.h"
 

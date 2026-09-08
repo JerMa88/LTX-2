@@ -1,15 +1,13 @@
 #pragma once
 
-#include <torch/extension.h>
+#include <torch/types.h>
 
 #include <optional>
+#include <string>
+
+#include "nvfp4_kernel.h"
 
 namespace ltx_nvfp4 {
-
-// FP4 E2M1 / FP8 E4M3 range constants (see docs/NVFP4.md).
-constexpr float kE2M1Max = 6.0f;
-constexpr float kE4M3Max = 448.0f;
-constexpr int kBlockSize = 16;
 
 // Fused NVFP4 quantize: packs `x` (2-D, bf16/fp16/fp32, contiguous) into `out_packed`
 // (uint8, two E2M1 values per byte) and writes E4M3 block scales straight into the

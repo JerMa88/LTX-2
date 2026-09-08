@@ -13,7 +13,12 @@ from typing import Any, ClassVar
 
 import torch
 import torch.distributed as dist
-from all2all_cpp import All2All as All2AllCpp
+
+try:
+    from all2all_cpp import All2All as All2AllCpp
+except ImportError:
+    All2AllCpp = None
+
 from torch.library import custom_op
 
 # Output shapes are derived symbolically from the input tensor's shape under
@@ -103,6 +108,11 @@ class All2All:
         group: torch.distributed.ProcessGroup | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
+        if All2AllCpp is None:
+            raise RuntimeError(
+                "All2All requires the all2all_cpp extension, which is only supported on Linux (CUDA IPC handles)."
+            )
+
         self.rank = rank
         self.world_size = world_size
         self.num_sms = num_sms

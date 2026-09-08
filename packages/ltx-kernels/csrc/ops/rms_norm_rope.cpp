@@ -4,10 +4,12 @@
 
 // Host entry point for the fused RMS-norm + RoPE kernel.
 
+#include <string>
+#include <vector>
+
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <torch/extension.h>
-#include <vector>
+#include <torch/types.h>
 
 #include "fast_hadamard_transform.h"
 
@@ -81,7 +83,7 @@ at::Tensor rms_norm_rope(at::Tensor &x, c10::optional<at::Tensor>& weights_, at:
     CHECK_SHAPE(x, batch_size, dim_og);
     TORCH_CHECK(x.stride(1) == 1);
     if (dim_og % 8 != 0) {
-        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, 8 - dim_og % 8}));
+        x = torch::constant_pad_nd(x, {0, 8 - dim_og % 8});
     }
     const int dim = x.size(1);
     at::Tensor out;
