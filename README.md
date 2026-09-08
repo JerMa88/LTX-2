@@ -69,7 +69,22 @@ For deployment on NVIDIA A100-SXM4-80GB DGX nodes via SLURM:
   - Automatically concatenates the scenes and muxes `inputs/smu/smu_voiceover.wav` into `outputs/smu_commercial_full.mp4`.
 
 
+## ⚡ NVIDIA GeForce RTX 5080 (Blackwell NVFP4) Workstation Setup
+
+For running locally on personal workstations equipped with an **NVIDIA GeForce RTX 5080 (16GB VRAM, SM 12.0)** and 64GB host RAM:
+- **Workstation Setup Guide**: See [RTX_5080_SETUP_GUIDE.md](RTX_5080_SETUP_GUIDE.md) for step-by-step installation, CUDA 12.8 + MSVC toolchain requirements, and quick-start commands.
+- **Deep-Dive Technical Architecture**: See [DOCS/RTX_5080_NVFP4.md](DOCS/RTX_5080_NVFP4.md) for Blackwell tensor core details, MSVC C1001 fixes, memory watermarks, and autograd lifecycle solutions.
+- **System Pre-Flight Check**:
+  ```powershell
+  python preflight_check.py
+  ```
+- **Two-Stage Production Generation**:
+  ```powershell
+  python run_rtx5080.py --prompt "Your prompt here" --num-frames 25 --width 1280 --height 768 --output outputs/video.mp4
+  ```
+
 In cases of GPU memory constraints, consider `--quantization fp8-cast --offload {cpu, disk}`. See [additional flags](packages/ltx-pipelines/docs/installation.md#common-cli-flags).
+
 
 This is **DistilledPipeline**: the fast starting point. For **production quality** (slower, more VRAM), run [DFR](#dfr-production-quality) below. For other capabilities, see [Models](#full-model-list) and [Pipelines](#available-pipelines).
 
