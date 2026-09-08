@@ -95,3 +95,12 @@ wandb/
 
 # Binary files
 *.so
+*.pyd
+*.obj
+*.exp
+*.lib
+*.dll
+*.pdb
+
+# Scratch directory
+scratch/
