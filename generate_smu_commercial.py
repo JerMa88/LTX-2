@@ -553,10 +553,12 @@ def main() -> None:
 
     master_output = args.outputs_dir / "smu_commercial_full.mp4"
 
-    if not args.skip_generation:
-        # Check which scenes need generation
+    # =========================================================================
+    # Mode 1: Multi-Scene Master Orchestrator (Subprocess Isolation)
+    # =========================================================================
+    if args.scene_id is None and not args.skip_generation:
         scenes_pending = []
-        for sc in scenes_to_run:
+        for sc in SCENES:
             scene_output = args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4"
             if args.force or not is_video_valid(
                 scene_output, sc["num_frames"], args.width, args.height
@@ -569,97 +571,160 @@ def main() -> None:
                 )
 
         if scenes_pending:
-            print(f"\nInitializing LTX-2.5 TI2VidTwoStagesHQPipeline on {torch.cuda.get_device_name(0)}...", flush=True)
-            t0 = time.time()
+            print("=" * 80, flush=True)
+            print("  HQ PIPELINE: MULTI-SCENE SUBPROCESS ORCHESTRATOR", flush=True)
+            print(f"  Dispatching {len(scenes_pending)} pending scene(s) in clean isolated subprocesses", flush=True)
+            print("=" * 80, flush=True)
 
-            transformer_path = (
-                args.transformer_path
-                if args.transformer_path
-                else str(args.models_dir / "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors")
-            )
-            model_paths = ModelPaths.from_split(
-                transformer_path=transformer_path,
-                text_encoder_path=str(
-                    args.models_dir / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
-                ),
-                video_vae_path=str(args.models_dir / "vae/ltx-2.5-video-vae-bf16.safetensors"),
-                audio_vae_path=str(args.models_dir / "vae/ltx-2.5-audio-vae-bf16.safetensors"),
-            )
-            spatial_upsampler_path = str(
-                args.models_dir
-                / "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
-            )
-            distilled_lora_path = str(
-                args.models_dir
-                / "loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
-            )
-            distilled_lora = [
-                LoraPathStrengthAndSDOps(
-                    path=distilled_lora_path,
-                    strength=1.0,
-                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
-                )
-            ]
-
-            quant_policy = None
-            if args.quantization:
-                if args.quantization in ("nvfp4-cast", "nvfp4-prequant"):
-                    if torch.cuda.is_available():
-                        major, minor = torch.cuda.get_device_capability(0)
-                        if major < 10:
-                            raise RuntimeError(
-                                f"NVFP4 quantization requires NVIDIA Blackwell architecture (SM >= 10.0) with hardware FP4 tensor cores. "
-                                f"Current device is {torch.cuda.get_device_name(0)} (sm_{major}{minor}). "
-                                f"Please use '--quantization fp8-cast' or '--quantization fp8-scaled-mm' instead."
-                            )
-                from ltx_pipelines.utils.quantization_factory import QuantizationKind
-                quant_kind = QuantizationKind(args.quantization)
-                quant_policy = quant_kind.to_policy(checkpoint_path=transformer_path)
-                print(f"Applying quantization policy: {args.quantization}", flush=True)
-
-            pipeline = TI2VidTwoStagesHQPipeline(
-                model_paths=model_paths,
-                distilled_lora=distilled_lora,
-                distilled_lora_strength_stage_1=args.distilled_lora_strength_stage_1,
-                distilled_lora_strength_stage_2=args.distilled_lora_strength_stage_2,
-                spatial_upsampler_path=spatial_upsampler_path,
-                loras=(),
-                quantization=quant_policy,
-                offload_mode=OffloadMode.CPU,
-            )
-            print(f"HQ Pipeline initialized in {time.time() - t0:.2f}s.", flush=True)
-
-            total_pending = len(scenes_pending)
             for idx, sc in enumerate(scenes_pending, 1):
-                scene_output = args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4"
-                print("\n" + "=" * 60, flush=True)
                 print(
-                    f"[{idx}/{total_pending}] Generating Scene {sc['id']}: {sc['name']} ({sc['num_frames']} frames)...",
+                    f"\n>>> [Orchestrator {idx}/{len(scenes_pending)}] Spawning isolated process for Scene {sc['id']}: {sc['name']}...",
                     flush=True,
                 )
-                print(f"Image: {sc['image']}", flush=True)
-                print(f"Prompt: {sc['prompt']}", flush=True)
-                print("=" * 60, flush=True)
+                cmd = [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--scene-id", str(sc["id"]),
+                    "--inputs-dir", str(args.inputs_dir),
+                    "--outputs-dir", str(args.outputs_dir),
+                    "--scenes-dir", str(args.scenes_dir),
+                    "--models-dir", str(args.models_dir),
+                    "--quantization", str(args.quantization),
+                    "--width", str(args.width),
+                    "--height", str(args.height),
+                    "--frame-rate", str(args.frame_rate),
+                    "--steps", str(args.steps),
+                    "--video-cfg", str(args.video_cfg),
+                    "--video-rescale", str(args.video_rescale),
+                    "--audio-cfg", str(args.audio_cfg),
+                    "--distilled-lora-strength-stage-1", str(args.distilled_lora_strength_stage_1),
+                    "--distilled-lora-strength-stage-2", str(args.distilled_lora_strength_stage_2),
+                ]
+                if args.transformer_path:
+                    cmd.extend(["--transformer-path", str(args.transformer_path)])
+                if args.voiceover_path:
+                    cmd.extend(["--voiceover-path", str(args.voiceover_path)])
+                if args.no_voiceover:
+                    cmd.append("--no-voiceover")
+                if args.force:
+                    cmd.append("--force")
 
-                render_scene(pipeline, sc, args, scene_output)
+                res = subprocess.run(cmd)
+                if res.returncode != 0:
+                    print(f"[!] Subprocess for Scene {sc['id']} failed with exit code {res.returncode}", flush=True)
+                    sys.exit(res.returncode)
+                print(f"[+] Scene {sc['id']} completed successfully. Host memory 100% reclaimed by OS.\n", flush=True)
 
-                # Clean up memory between scenes
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            print("\nAll pending scenes generated successfully!", flush=True)
+        extract_preview_frames(args.scenes_dir, SCENES, previews_dir)
+        all_scenes_exist = all(
+            (args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4").is_file() for sc in SCENES
+        )
+        if all_scenes_exist:
+            assemble_commercial(args.scenes_dir, voiceover_path, master_output, SCENES)
         else:
-            print("\n" + "=" * 70, flush=True)
-            print("NOTICE: All requested scenes already exist in outputs/smu_scenes/ and are valid.", flush=True)
-            print("Skipping AI diffusion generation. (Job did not fail; cache validation succeeded).", flush=True)
-            print("To force re-rendering of existing scenes, run with: --force", flush=True)
-            print("Or to re-render a specific scene, run with: --scene-id <1-7> --force", flush=True)
-            print("=" * 70 + "\n", flush=True)
+            print("Note: Not all 7 scenes exist yet; skipping assembly.")
+        return
 
-    # Extract preview frames
+    # =========================================================================
+    # Mode 2: Single-Scene Generation (Runs in its own fresh process)
+    # =========================================================================
+    if args.scene_id is not None and not args.skip_generation:
+        sc = next((s for s in SCENES if s["id"] == args.scene_id), None)
+        if sc is None:
+            raise ValueError(f"Invalid scene ID: {args.scene_id}. Must be 1-7.")
+
+        scene_output = args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4"
+        if not args.force and is_video_valid(
+            scene_output, sc["num_frames"], args.width, args.height
+        ):
+            print(
+                f"[SKIP] Scene {sc['id']}: {sc['name']} already exists at {args.width}x{args.height} and is valid.",
+                flush=True,
+            )
+            return
+
+        print(f"\nInitializing LTX-2.5 TI2VidTwoStagesHQPipeline on {torch.cuda.get_device_name(0)}...", flush=True)
+        t0 = time.time()
+
+        transformer_path = (
+            args.transformer_path
+            if args.transformer_path
+            else str(args.models_dir / "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors")
+        )
+        model_paths = ModelPaths.from_split(
+            transformer_path=transformer_path,
+            text_encoder_path=str(
+                args.models_dir / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
+            ),
+            video_vae_path=str(args.models_dir / "vae/ltx-2.5-video-vae-bf16.safetensors"),
+            audio_vae_path=str(args.models_dir / "vae/ltx-2.5-audio-vae-bf16.safetensors"),
+        )
+        spatial_upsampler_path = str(
+            args.models_dir
+            / "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+        )
+        distilled_lora_path = str(
+            args.models_dir
+            / "loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+        )
+        distilled_lora = [
+            LoraPathStrengthAndSDOps(
+                path=distilled_lora_path,
+                strength=1.0,
+                sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+            )
+        ]
+
+        quant_policy = None
+        if args.quantization:
+            if args.quantization in ("nvfp4-cast", "nvfp4-prequant"):
+                if torch.cuda.is_available():
+                    major, minor = torch.cuda.get_device_capability(0)
+                    if major < 10:
+                        raise RuntimeError(
+                            f"NVFP4 quantization requires NVIDIA Blackwell architecture (SM >= 10.0) with hardware FP4 tensor cores. "
+                            f"Current device is {torch.cuda.get_device_name(0)} (sm_{major}{minor}). "
+                            f"Please use '--quantization fp8-cast' or '--quantization fp8-scaled-mm' instead."
+                        )
+            from ltx_pipelines.utils.quantization_factory import QuantizationKind
+            quant_kind = QuantizationKind(args.quantization)
+            quant_policy = quant_kind.to_policy(checkpoint_path=transformer_path)
+            print(f"Applying quantization policy: {args.quantization}", flush=True)
+
+        pipeline = TI2VidTwoStagesHQPipeline(
+            model_paths=model_paths,
+            distilled_lora=distilled_lora,
+            distilled_lora_strength_stage_1=args.distilled_lora_strength_stage_1,
+            distilled_lora_strength_stage_2=args.distilled_lora_strength_stage_2,
+            spatial_upsampler_path=spatial_upsampler_path,
+            loras=(),
+            quantization=quant_policy,
+            offload_mode=OffloadMode.CPU,
+        )
+        print(f"HQ Pipeline initialized in {time.time() - t0:.2f}s.", flush=True)
+
+        print("\n" + "=" * 60, flush=True)
+        print(
+            f"Generating Scene {sc['id']}: {sc['name']} ({sc['num_frames']} frames)...",
+            flush=True,
+        )
+        print(f"Image: {sc['image']}", flush=True)
+        print(f"Prompt: {sc['prompt']}", flush=True)
+        print("=" * 60, flush=True)
+
+        render_scene(pipeline, sc, args, scene_output)
+
+        del pipeline
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return
+
+    # =========================================================================
+    # Mode 3: Skip Generation (Assembly & Previews Only)
+    # =========================================================================
     extract_preview_frames(args.scenes_dir, SCENES, previews_dir)
 
-    # Assemble full commercial if all 7 scenes exist
     all_scenes_exist = all(
         (args.scenes_dir / f"scene_{sc['id']:02d}_{sc['name']}.mp4").is_file() for sc in SCENES
     )
