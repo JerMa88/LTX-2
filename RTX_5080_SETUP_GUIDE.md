@@ -10,17 +10,17 @@ This guide provides the battle-tested, production-ready blueprint to run the off
 ## 1. Hardware Architecture & Feasibility Math
 
 ### Can 16 GB VRAM Run LTX-2.5 1080p?
-**YES, 100% operational via native Blackwell NVFP4 quantization.**
+**YES, 100% operational via native Blackwell NVFP4 quantization and block streaming.**
 
 | Component | Baseline BF16 | RTX 5080 NVFP4 Setup | Memory Location & Peak Footprint |
 |---|---|---|---|
-| **Diffusion Transformer (22B)** | 42 GB (OOM on 16GB) | **NVFP4** (17.44 GB) | **Native VRAM** via `OffloadMode.NONE`. Fully pre-quantized in FP4 weights. |
-| **Gemma 4 12B Text Encoder** | 24.5 GB (OOM on 16GB) | Gemma 4 12B BF16 + Projection | **Host RAM**. Loaded during prompt encoding, immediately freed. |
+| **Diffusion Transformer (22B)** | 42 GB (OOM on 16GB) | **NVFP4** (17.44 GB) | **Native VRAM** (`OffloadMode.NONE`) or **CPU Block Streaming** (`OffloadMode.CPU`, <600MB resident on GPU). |
+| **Gemma 4 12B Text Encoder** | 24.5 GB (OOM on 16GB) | Gemma 4 12B BF16 + Projection | **Host RAM**. Loaded during prompt encoding, immediately freed. Zero-mmap streaming prevents commit spikes. |
 | **Spatial Upscaler (2x)** | 0.93 GB | LTX-2.5 Latent Upscaler | **VRAM** (~0.9 GB). |
-| **Stage 1 (e.g. 640×384 or 960×544)** | ~12 GB VRAM | Active Denoising State | **~6.5 GB VRAM** peak. |
-| **Stage 2 Super-Resolution (1280×768 or 1920×1088)** | ~28 GB VRAM (OOM on 16GB) | Latent Auto-Tiling | **~9.5 - 11 GB VRAM** peak. |
-| **DiffVAE Video Decoder (SDR H.264)** | ~34 GB VRAM (OOM on 16GB) | `AUTO_TILING` + Chunked VAE | **~11.8 - 13.5 GB VRAM** peak. |
-| **Total Host RAM Utilization** | ~96 GB | Pinned Weights + Paging | **~21 - 38 GB Host RAM** (comfortably within 64 GB). |
+| **Stage 1 (640×384)** | ~12 GB VRAM | Active Denoising State | **~4.57 GB VRAM** peak with NVFP4. |
+| **Stage 2 Super-Resolution (1280×768)** | ~28 GB VRAM (OOM on 16GB) | Latent Spatial Upscale + Euler | **~5.90 GB VRAM** peak. |
+| **DiffVAE Video Decoder** | ~34 GB VRAM (OOM on 16GB) | `CHUNKED_EAGER` tiling | **~1.35 GB VRAM** peak. |
+| **Total VRAM Utilization** | OOM on 16GB | **DistilledPipeline NVFP4** | **8.13 GB Peak VRAM** (50.8% of 16 GB capacity). |
 
 ### The Blackwell Advantage
 Unlike Ampere (A100) or Ada Lovelace (RTX 4090), the **RTX 5080** features **Blackwell SM 12.0 NVFP4 hardware Tensor Cores**:
@@ -40,8 +40,8 @@ Unlike Ampere (A100) or Ada Lovelace (RTX 4090), the **RTX 5080** features **Bla
    - **Windows 11**: Visual Studio 2022 Build Tools (MSVC v143 - VS 2022 C++ x64/x86 build tools + Windows 10/11 SDK).
    - **Linux**: `sudo apt update && sudo apt install -y build-essential ninja-build git git-lfs ffmpeg`
 4. **Python**: Python **3.12** 64-bit.
-5. **Windows Pagefile**:
-   - Total commit limit must be at least **80 GB** (RAM + Pagefile).
+5. **Windows Pagefile / Virtual Memory**:
+   - Total commit limit must be at least **80 GB** (Physical RAM + Pagefile).
    - Verify via PowerShell:
      ```powershell
      Get-CimInstance Win32_PageFileUsage | Select-Object AllocatedBaseSize, CurrentUsage
@@ -73,7 +73,6 @@ python -m venv .venv
 ```
 
 ### Step 4: Compile Blackwell NVFP4 Kernels (`ltx-kernels`)
-The C++/CUDA extension includes decoupled host and device sources to avoid MSVC compiler template crashes:
 ```powershell
 # Option A: Run automated build script
 .\scripts\build_ltx_kernels.bat
@@ -93,7 +92,7 @@ $env:TORCH_CUDA_ARCH_LIST = "12.0"
 
 ---
 
-## 4. Downloading & Preparing Models
+## 4. Checkpoint Organization
 
 All models reside under `models/ltx25`:
 ```
@@ -106,22 +105,8 @@ models/ltx25/
 │   ├── ltx-2.5-video-vae-bf16.safetensors (1.37 GB)
 │   └── ltx-2.5-audio-vae-bf16.safetensors (0.34 GB)
 └── text_encoders/
-    ├── gemma4-12b-with-proj-ltx-2.5-nvfp4.safetensors (9.87 GB)
-    └── gemma4-12b-with-proj-ltx-2.5-bf16.safetensors (24.46 GB, converted)
+    └── gemma4-12b-with-proj-ltx-2.5-bf16.safetensors (24.46 GB)
 ```
-
-### Step 1: Download Checkpoints
-Run the multi-connection download script:
-```powershell
-.\.venv\Scripts\python.exe scripts/download_ltx25_nvfp4.py
-```
-
-### Step 2: Convert Gemma 4 to Standard BF16
-Convert the packed ComfyUI `.comfy_quant` format to native BF16 for HuggingFace compatibility:
-```powershell
-.\.venv\Scripts\python.exe scripts/dequantize_gemma_nvfp4.py
-```
-*(Takes under 10 seconds using the RTX 5080 hardware dequantizer).*
 
 ---
 
@@ -148,48 +133,42 @@ Ensure all 4 sections pass:
 
 ## 6. Running Video Generations
 
-### Quick Test Generation (9 frames, 1280x768, ~3-4 minutes)
+### Method A: Ultra-Fast Distilled Pipeline (Recommended)
+Generates high-definition (1280×768) video in **~134 seconds (~2.2 minutes)** using the 22B NVFP4 distilled model:
+
 ```powershell
-.\.venv\Scripts\python.exe run_rtx5080.py `
-  --prompt "A vibrant hummingbird hovering near tropical flowers" `
-  --num-frames 9 `
-  --width 1280 `
-  --height 768 `
-  --steps 8 `
-  --output outputs/hummingbird_9f.mp4
+# Run the multi-scene commercial orchestrator (isolated subprocesses per scene)
+.\.venv\Scripts\python.exe generate_smu_commercial_distilled.py
+
+# Or render a single scene
+.\.venv\Scripts\python.exe generate_smu_commercial_distilled.py --scene-id 1 --force
 ```
 
-### High-Quality 25-Frame Generation (~15-20 minutes)
+### Method B: Full Production TI2VidTwoStagesHQPipeline (Dev Model + LoRA)
+For custom CFG guidance and negative prompt enforcement:
 ```powershell
 .\.venv\Scripts\python.exe run_rtx5080.py `
-  --prompt "A cinematic drone shot of a misty fjord in Norway at dawn" `
-  --num-frames 25 `
-  --width 1280 `
-  --height 768 `
-  --steps 15 `
-  --output outputs/fjord_25f.mp4
-```
-
-### Full Production 121-Frame Generation (1088p, ~1.5 - 2 hours)
-```powershell
-.\.venv\Scripts\python.exe run_rtx5080.py `
-  --prompt "A cinematic shot of a majestic waterfall in a lush tropical forest with sunlight rays" `
+  --prompt "A cinematic drone shot of Dallas Hall on the SMU campus, warm morning sunlight" `
   --num-frames 121 `
-  --width 1920 `
-  --height 1088 `
+  --width 1280 `
+  --height 768 `
   --steps 15 `
-  --output outputs/waterfall_121f.mp4
+  --output outputs/dallas_hall.mp4
 ```
 
 ---
 
 ## 7. Important Technical Rules & Constraints
 
-1. **Resolution Divisibility**:
-   - For `TI2VidTwoStagesHQPipeline`, `width` and `height` must be multiples of 64 (e.g. `1280x768`, `1920x1088`).
-2. **Frame Count**:
+1. **NVFP4 Weight Scale Invariant**:
+   - In safetensors, NVFP4 `weight_scale` tensors are stored as `float8_e4m3fn`.
+   - They **must** be viewed in memory as raw bytes via `.view(torch.uint8)`.
+   - **Never** perform an arithmetic copy (`copy_()`) between `float8` and `uint8`, as values $< 1.0$ will truncate to 0 and destroy generation quality.
+2. **Zero-MMap File Loader**:
+   - To prevent Windows `0xC0000005` virtual address space commit collisions between pinned buffers (20.3 GB) and checkpoints (24.5 GB), all weights are streamed directly via `f.readinto()` rather than `safetensors.safe_open()`.
+3. **Subprocess Isolation**:
+   - Multi-scene generation batches should run each scene in a dedicated process (`subprocess.run([sys.executable, ...])`) so host RAM is 100% reclaimed by the operating system between scenes.
+4. **Resolution Divisibility**:
+   - Width and height must be multiples of 64 (e.g. `1280x768`, `1920x1088`).
+5. **Frame Count**:
    - Total frames must be `8 * k + 1` (e.g. 9, 17, 25, 33, 41, ..., 121).
-3. **Offload Mode**:
-   - Must use `OffloadMode.NONE` with pre-quantized NVFP4. `OffloadMode.CPU` / `DISK` is not supported by block streaming with NVFP4 policies.
-4. **Inference Mode**:
-   - Always invoke `encode_video()` under `@torch.inference_mode()` to ensure lazy generator iteration does not trigger autograd conflicts.
