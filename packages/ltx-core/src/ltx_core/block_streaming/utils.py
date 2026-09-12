@@ -13,6 +13,7 @@ from torch import nn
 from ltx_core.loader.primitives import TensorLayout
 
 FP8_DTYPES = frozenset({torch.float8_e4m3fn, torch.float8_e5m2})
+PRESERVED_DTYPES = FP8_DTYPES | frozenset({torch.uint8, torch.float32})
 
 _BUFFER_ALIGN = 16
 
@@ -52,12 +53,19 @@ def assign_tensor_to_module(root: nn.Module, dotted_name: str, tensor: torch.Ten
 
 def derive_layout(tensors: dict[str, torch.Tensor], dtype: torch.dtype | None = None) -> TensorLayout:
     """Derive a layout from a ``{name: tensor}`` dict.
-    If ``dtype`` is given, non-FP8 dtypes are coerced to it (FP8 preserved). If
-    ``None``, the source dtype is preserved as-is.
+    If ``dtype`` is given, non-preserved dtypes are coerced to it (FP8, NVFP4 uint8,
+    and scalar decode scales preserved). If ``None``, the source dtype is preserved as-is.
     """
-    return {
-        name: (t.shape, t.dtype if dtype is None or t.dtype in FP8_DTYPES else dtype) for name, t in tensors.items()
-    }
+    layout: TensorLayout = {}
+    for name, t in tensors.items():
+        if dtype is None or t.dtype in FP8_DTYPES or t.dtype == torch.uint8:
+            out_dtype = t.dtype
+        elif name.endswith(".weight_scale_2") or name.endswith(".input_scale"):
+            out_dtype = torch.float32
+        else:
+            out_dtype = dtype
+        layout[name] = (t.shape, out_dtype)
+    return layout
 
 
 def _align_up(offset: int, alignment: int) -> int:

@@ -251,14 +251,14 @@ def _build_gemma3_llm_key_ops() -> SDOps:
 
 def _gemma4_unified_is_comfy_flat(gemma_model_path: str) -> bool:
     """True when weights use Comfy's flattened ``model.layers.*`` LM layout."""
-    import safetensors  # noqa: PLC0415 -- only needed on this probe path
+    from ltx_core.loader.sft_loader import read_safetensors_header
 
     for path in resolve_gemma_weight_paths(gemma_model_path):
-        with safetensors.safe_open(path, framework="pt") as handle:
-            keys = set(handle.keys())
-        if "model.layers.0.post_feedforward_layernorm.weight" in keys:
+        _, keys = read_safetensors_header(str(path))
+        key_set = set(keys)
+        if "model.layers.0.post_feedforward_layernorm.weight" in key_set:
             return True
-        if any(k.startswith("model.language_model.") for k in keys):
+        if any(k.startswith("model.language_model.") for k in key_set):
             return False
     return False
 

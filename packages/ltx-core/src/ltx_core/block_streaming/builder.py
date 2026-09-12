@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
+import struct
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final, Generic
 
@@ -40,7 +42,7 @@ from ltx_core.loader.primitives import (
 )
 from ltx_core.loader.registry import ModelRegistry, Registry
 from ltx_core.loader.sd_ops import SDOps
-from ltx_core.loader.sft_loader import SafetensorsModelStateDictLoader
+from ltx_core.loader.sft_loader import SAFE_DTYPES, SafetensorsModelStateDictLoader
 from ltx_core.model.model_protocol import ModelConfigurator, ModelType
 
 if TYPE_CHECKING:
@@ -51,6 +53,7 @@ logger = logging.getLogger(__name__)
 DISK_CPU_SLOTS = 2
 _DEFAULT_GPU_SLOTS = 2
 _PREFETCH_DEPTH = 2
+
 
 
 class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType]):
@@ -316,7 +319,6 @@ class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType])
                     f"Pinned source requires one CPU slot per block; "
                     f"got block index {block_idx} with only {cpu_slots_count} slots."
                 )
-
         # One contiguous pinned buffer per block, carved into per-param views. The
         # views (flattened by full key) are filled in place; the source then keeps
         # only the contiguous buffer and the layout to re-carve it on read.
@@ -325,7 +327,8 @@ class StreamingModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType])
         fill_views: dict[str, torch.Tensor] = {}
         for block_idx, entries in block_key_map.items():
             block_state = _block_state(blocks[block_idx])
-            layout = derive_layout({param_name: block_state[param_name] for _sft_key, param_name in entries}, dtype)
+            filtered_entries = [e for e in entries if e[1] in block_state]
+            layout = derive_layout({param_name: block_state[param_name] for _sft_key, param_name in filtered_entries}, dtype)
             buffer = bs_utils.alloc_buffer(layout_nbytes(layout), torch.device("cpu"), pin_memory=True)
             views = carve_buffer(buffer, layout)
             pinned_buffers[block_idx] = buffer
@@ -464,7 +467,8 @@ def _block_layouts(
     layouts: dict[int, TensorLayout] = {}
     for idx, entries in block_key_map.items():
         state = _block_state(blocks[idx])
-        layouts[idx] = derive_layout({param_name: state[param_name] for _sft_key, param_name in entries}, dtype)
+        filtered_entries = [e for e in entries if e[1] in state]
+        layouts[idx] = derive_layout({param_name: state[param_name] for _sft_key, param_name in filtered_entries}, dtype)
     return layouts
 
 
@@ -481,8 +485,9 @@ def _scan_checkpoint_keys(
     non_block_keys: list[tuple[str, str]] = []
     prefix_dot = blocks_prefix + "."
     for path in checkpoint_paths:
-        with safetensors.safe_open(path, framework="pt", device="cpu") as handle:
-            for sft_key in handle.keys():  # noqa: SIM118
+        from ltx_core.loader.sft_loader import read_safetensors_header
+        _, keys = read_safetensors_header(path)
+        for sft_key in keys:
                 model_key = sd_ops.apply_to_key(sft_key) if sd_ops else sft_key
                 if model_key is None:
                     continue
@@ -493,6 +498,8 @@ def _scan_checkpoint_keys(
                         block_idx = int(idx_str)
                     except ValueError:
                         non_block_keys.append((sft_key, model_key))
+                        continue
+                    if param_name.endswith(".comfy_quant") or param_name == "comfy_quant":
                         continue
                     block_key_map.setdefault(block_idx, []).append((sft_key, param_name))
                 else:

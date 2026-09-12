@@ -104,32 +104,41 @@ class GemmaAssets:
     @classmethod
     def from_single_file(cls, path: Path) -> GemmaAssets:
         path = Path(path)
-        with safetensors.safe_open(str(path), framework="pt") as f:
-            meta = f.metadata() or {}
+        import struct
+
+        with open(path, "rb") as f:
+            length_bytes = f.read(8)
+            (header_len,) = struct.unpack("<Q", length_bytes)
+            header = json.loads(f.read(header_len).decode("utf-8"))
+            meta = header.get("__metadata__", {})
             raw_config = meta.get(GEMMA_CONFIG_METADATA_KEY)
             if raw_config is None:
                 raise ValueError(
                     f"Safetensors text-encoder {path} is missing metadata key "
                     f"{GEMMA_CONFIG_METADATA_KEY!r} (JSON-encoded HuggingFace config)."
                 )
-            config_dict = json.loads(raw_config)
+            config_dict = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
 
-            keys = set(f.keys())
-            if TOKENIZER_JSON_TENSOR_KEY not in keys:
+            if TOKENIZER_JSON_TENSOR_KEY not in header:
                 raise ValueError(f"Safetensors text-encoder {path} is missing tensor {TOKENIZER_JSON_TENSOR_KEY!r}.")
-            tokenizer_json = _tensor_to_bytes(f.get_tensor(TOKENIZER_JSON_TENSOR_KEY))
+            t_offsets = header[TOKENIZER_JSON_TENSOR_KEY]["data_offsets"]
+            f.seek(8 + header_len + t_offsets[0])
+            tokenizer_json = f.read(t_offsets[1] - t_offsets[0])
 
             sidecars: dict[str, bytes] = {}
-            for key in keys:
+            for key in header:
                 if not key.startswith(HF_ASSET_TENSOR_PREFIX):
                     continue
                 name = key.removeprefix(HF_ASSET_TENSOR_PREFIX)
-                sidecars[name] = _tensor_to_bytes(f.get_tensor(key))
+                offsets = header[key]["data_offsets"]
+                f.seek(8 + header_len + offsets[0])
+                sidecars[name] = f.read(offsets[1] - offsets[0])
 
             for name in _METADATA_FALLBACK_FILENAMES:
                 if name in sidecars or name not in meta:
                     continue
-                sidecars[name] = meta[name].encode()
+                val = meta[name]
+                sidecars[name] = val.encode() if isinstance(val, str) else str(val).encode()
 
         assets = cls(
             source=str(path),

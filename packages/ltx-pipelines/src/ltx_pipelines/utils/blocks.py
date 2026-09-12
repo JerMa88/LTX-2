@@ -82,6 +82,11 @@ from ltx_core.model.video_vae.transformer import (
     na_dsl_available,
 )
 from ltx_core.quantization import QuantizationPolicy, fp8_cast_fuse_rule
+try:
+    from ltx_core.quantization.nvfp4.fuse import nvfp4_fuse_rule
+except (ImportError, RuntimeError):
+    nvfp4_fuse_rule = None
+
 from ltx_core.text_encoders.gemma import (
     EMBEDDINGS_PROCESSOR_KEY_OPS,
     EmbeddingsProcessorConfigurator,
@@ -378,13 +383,14 @@ class DiffusionStage:
         Compilation / quantization sd_ops and module_ops are not applied here --
         the stage applies them lazily via :meth:`_prepared_builder`.
         """
-        # WeightsProvider currently only supports plain bf16 + fp8_cast LoRA fusion
-        # (no companion-key emission). Quantization policies that emit
-        # companion keys (e.g. ``.weight_scale``) cannot be streamed yet.
-        if quantization is not None and quantization.fuse_rule is not fp8_cast_fuse_rule:
+        # WeightsProvider supports plain bf16, fp8_cast, and nvfp4 LoRA fusion.
+        allowed_fuse_rules = (fp8_cast_fuse_rule,)
+        if nvfp4_fuse_rule is not None:
+            allowed_fuse_rules += (nvfp4_fuse_rule,)
+        if quantization is not None and quantization.fuse_rule not in allowed_fuse_rules:
             raise ValueError(
                 "Block streaming is not supported with this quantization policy "
-                "(only bf16 and fp8_cast are currently supported)."
+                "(only bf16, fp8_cast, and nvfp4 are currently supported)."
             )
         return StreamingModelBuilder(
             model_class_configurator=configurator,
